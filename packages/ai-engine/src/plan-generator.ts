@@ -1,31 +1,22 @@
-import OpenAI from 'openai';
 import { DiscoveryData, ExplorationPlan, WorkflowPlanItem, WorkflowStep } from '@automanual/shared';
+import { resilientLLM } from './llm-provider';
 
 export class PlanGenerator {
-  private openai: OpenAI | null = null;
-
-  constructor(apiKey?: string) {
-    const key = apiKey || process.env.OPENAI_API_KEY;
-    if (key && key.trim().length > 0 && !key.includes('your-openai-api-key')) {
-      this.openai = new OpenAI({ apiKey: key });
-    }
-  }
+  constructor() {}
 
   async generatePlan(discovery: DiscoveryData): Promise<ExplorationPlan> {
-    if (this.openai && discovery.sections && discovery.sections.length > 0) {
+    if (resilientLLM.hasAvailableProvider() && discovery.sections && discovery.sections.length > 0) {
       try {
-        return await this.generateWithOpenAI(discovery);
+        return await this.generateWithLLM(discovery);
       } catch (err: any) {
-        console.warn(`OpenAI plan generation failed (${err.message}). Using rule-based planner.`);
+        console.warn(`[PlanGenerator] Multi-LLM plan generation failed (${err.message}). Falling back to rule-based planner.`);
       }
     }
 
     return this.generateRuleBased(discovery);
   }
 
-  private async generateWithOpenAI(discovery: DiscoveryData): Promise<ExplorationPlan> {
-    if (!this.openai) throw new Error('OpenAI client not initialized');
-
+  private async generateWithLLM(discovery: DiscoveryData): Promise<ExplorationPlan> {
     const prompt = `You are a video tutorial director creating an automated user manual for a web application.
 Based on the following discovered sections and features, design an optimal, step-by-step exploration plan.
 
@@ -39,12 +30,12 @@ Requirements:
 2. Each workflow should have 2 to 5 clear, concrete steps.
 3. Allowed actions: "navigate", "click", "input", "scroll", "explain", "hover".
 4. NEVER perform destructive actions (no deletions, no live payments, no account resets).
-5. Provide a realistic total estimatedDuration in seconds (e.g., 60-120 seconds per workflow).
+5. Provide a realistic total estimatedDuration in seconds (e.g., 40-75 seconds per workflow).
 
 Return a valid JSON object strictly matching this schema:
 {
   "title": "string (e.g. 'QuickShop Complete User Manual')",
-  "estimatedDuration": number (total seconds, e.g. 480),
+  "estimatedDuration": number (total seconds, e.g. 300),
   "workflows": [
     {
       "id": "string (kebab-case identifier)",
@@ -62,17 +53,10 @@ Return a valid JSON object strictly matching this schema:
   ]
 }`;
 
-    const response = await this.openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'You are an autonomous tutorial planner producing structured JSON user manual plans.' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.2,
-    });
-
-    const parsed: ExplorationPlan = JSON.parse(response.choices[0]?.message?.content || '{}');
+    const parsed = await resilientLLM.completeJSON<ExplorationPlan>(
+      prompt,
+      'You are an autonomous tutorial planner producing structured JSON user manual plans.'
+    );
 
     if (!parsed.workflows || parsed.workflows.length === 0) {
       return this.generateRuleBased(discovery);
@@ -80,7 +64,7 @@ Return a valid JSON object strictly matching this schema:
 
     return {
       title: parsed.title || `${discovery.applicationName} User Manual`,
-      estimatedDuration: parsed.estimatedDuration || parsed.workflows.length * 90,
+      estimatedDuration: parsed.estimatedDuration || parsed.workflows.length * 75,
       workflows: parsed.workflows.map((w, idx) => ({
         id: w.id || `workflow-${idx + 1}`,
         title: w.title || `Workflow ${idx + 1}`,
@@ -150,10 +134,9 @@ Return a valid JSON object strictly matching this schema:
 
     // Sort by priority
     workflows.sort((a, b) => a.priority - b.priority);
-    // Re-index priority 1..N
     workflows.forEach((w, i) => { w.priority = i + 1; });
 
-    const totalSeconds = workflows.length * 80;
+    const totalSeconds = workflows.length * 75;
 
     return {
       title: `${discovery.applicationName} User Manual`,

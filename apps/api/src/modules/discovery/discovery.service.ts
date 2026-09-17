@@ -1,8 +1,8 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { BrowserRunner, DiscoveryEngine } from '@automanual/browser-agent';
+import { BrowserRunner, DiscoveryEngine, LoginManager } from '@automanual/browser-agent';
 import { FeatureSynthesizer } from '@automanual/ai-engine';
-import { ProjectStatus, DiscoveryData } from '@automanual/shared';
+import { ProjectStatus, DiscoveryData, decryptCredentials } from '@automanual/shared';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -11,6 +11,7 @@ export class DiscoveryService {
   private readonly logger = new Logger(DiscoveryService.name);
   private discoveryEngine = new DiscoveryEngine();
   private featureSynthesizer = new FeatureSynthesizer();
+  private loginManager = new LoginManager();
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -40,6 +41,50 @@ export class DiscoveryService {
 
     try {
       this.logger.log(`Starting autonomous discovery for project ${project.name} (${project.baseUrl})`);
+
+      // 1. If project requires authentication, execute login first and store session
+      if (project.authRequired && project.credentialsEncrypted) {
+        let username = '';
+        let password = '';
+        const secretKey = process.env.ENCRYPTION_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
+        if (project.credentialsEncrypted.startsWith('enc:')) {
+          const parts = project.credentialsEncrypted.replace('enc:', '').split(':');
+          username = parts[0] || '';
+          password = parts[1] || '';
+        } else {
+          try {
+            const decrypted = decryptCredentials(project.credentialsEncrypted, secretKey);
+            const parsed = JSON.parse(decrypted);
+            username = parsed.username || '';
+            password = parsed.password || '';
+          } catch {
+            this.logger.warn('Failed to decrypt credentials with AES, using raw string');
+          }
+        }
+
+        this.logger.log(`Performing autonomous login for user "${username}" at ${project.baseUrl}...`);
+        const authPage = await runner.launch({
+          viewport: { width: 1920, height: 1080 },
+        });
+
+        await authPage.goto(project.baseUrl, { waitUntil: 'networkidle', timeout: 30000 });
+        const loginResult = await this.loginManager.login(runner, authPage, {
+          username,
+          password,
+          storageStatePath: sessionPath,
+        });
+
+        if (!loginResult.success) {
+          this.logger.warn(`Login attempt result: ${loginResult.error || 'Form still visible'}`);
+        } else {
+          this.logger.log(`Login successful! Authenticated session saved to ${sessionPath}`);
+        }
+
+        await runner.close();
+      }
+
+      // 2. Launch browser with authenticated storageState (if available) to crawl the application
       const page = await runner.launch({
         viewport: { width: 1920, height: 1080 },
         storageStatePath: fs.existsSync(sessionPath) ? sessionPath : undefined,
@@ -53,9 +98,9 @@ export class DiscoveryService {
         { screenshotsDir, maxRoutes: 6 }
       );
 
-      this.logger.log(`Discovered ${rawSections.length} sections for ${project.name}. Synthesizing feature map...`);
+      this.logger.log(`Discovered ${rawSections.length} sections for ${project.name}. Synthesizing feature map with AI...`);
 
-      // Synthesize high-level feature map
+      // Synthesize high-level feature map using Resilient AI
       const discoveryData = await this.featureSynthesizer.synthesize(
         project.name,
         project.baseUrl,

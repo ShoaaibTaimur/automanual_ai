@@ -1,8 +1,8 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { Queue, Worker, Job } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
-import { ProjectStatus, ExplorationPlan } from '@automanual/shared';
-import { WorkflowExecutor } from '@automanual/browser-agent';
+import { ProjectStatus, ExplorationPlan, decryptCredentials } from '@automanual/shared';
+import { WorkflowExecutor, BrowserRunner, LoginManager } from '@automanual/browser-agent';
 import { AiEngine } from '@automanual/ai-engine';
 import { RemotionVideoRenderer } from '@automanual/video-engine';
 import Redis from 'ioredis';
@@ -20,6 +20,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
   private worker: Worker<GenerationJobData> | null = null;
   private redisConnection: Redis | null = null;
   private workflowExecutor = new WorkflowExecutor();
+  private loginManager = new LoginManager();
   private aiEngine = new AiEngine();
   private videoRenderer = new RemotionVideoRenderer();
 
@@ -125,6 +126,41 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
 
       // Stage 2: RECORDING (Execute real workflows and record browser video)
       await this.updateStatus(projectId, ProjectStatus.RECORDING, 35, job);
+
+      // Verify or create authenticated session if required
+      if (project.authRequired && project.credentialsEncrypted && !fs.existsSync(sessionPath)) {
+        try {
+          this.logger.log(`Project requires auth and session missing. Logging in before video recording...`);
+          let username = '';
+          let password = '';
+          const secretKey = process.env.ENCRYPTION_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
+          if (project.credentialsEncrypted.startsWith('enc:')) {
+            const parts = project.credentialsEncrypted.replace('enc:', '').split(':');
+            username = parts[0] || '';
+            password = parts[1] || '';
+          } else {
+            const decrypted = decryptCredentials(project.credentialsEncrypted, secretKey);
+            const parsed = JSON.parse(decrypted);
+            username = parsed.username || '';
+            password = parsed.password || '';
+          }
+
+          const loginRunner = new BrowserRunner();
+          const loginPage = await loginRunner.launch({ viewport: { width: 1920, height: 1080 } });
+          await loginPage.goto(project.baseUrl, { waitUntil: 'networkidle', timeout: 30000 });
+          await this.loginManager.login(loginRunner, loginPage, {
+            username,
+            password,
+            storageStatePath: sessionPath,
+          });
+          await loginRunner.close();
+          this.logger.log(`Session initialized for recording at ${sessionPath}`);
+        } catch (authErr: any) {
+          this.logger.warn(`Recording pre-auth failed: ${authErr.message}`);
+        }
+      }
+
       this.logger.log(`Executing ${planData.workflows.length} workflows in Chromium at 1920x1080...`);
 
       const executionResult = await this.workflowExecutor.executePlan(

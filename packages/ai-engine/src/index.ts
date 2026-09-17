@@ -1,10 +1,10 @@
+export * from './llm-provider';
 export * from './feature-synthesizer';
 export * from './plan-generator';
 export * from './narration-generator';
 export * from './voice-generator';
 export * from './timeline-builder';
 
-import OpenAI from 'openai';
 import { DiscoveryData, ExplorationPlan, NarrationSegment, InteractionEvent, VideoTimelineItem } from '@automanual/shared';
 import { PlanGenerator } from './plan-generator';
 import { NarrationGenerator } from './narration-generator';
@@ -22,8 +22,8 @@ export class AiEngine {
   private timelineBuilder: TimelineBuilder;
 
   constructor(config?: AiEngineConfig) {
-    this.planGenerator = new PlanGenerator(config?.apiKey);
-    this.narrationGenerator = new NarrationGenerator(config?.apiKey);
+    this.planGenerator = new PlanGenerator();
+    this.narrationGenerator = new NarrationGenerator();
     this.voiceGenerator = new VoiceGenerator(config?.apiKey);
     this.timelineBuilder = new TimelineBuilder();
   }

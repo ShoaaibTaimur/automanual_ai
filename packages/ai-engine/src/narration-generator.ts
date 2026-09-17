@@ -1,5 +1,5 @@
-import OpenAI from 'openai';
 import { InteractionEvent, WorkflowPlanItem, NarrationSegment } from '@automanual/shared';
+import { resilientLLM } from './llm-provider';
 
 export interface RawNarrationResponse {
   segments: {
@@ -11,53 +11,44 @@ export interface RawNarrationResponse {
 }
 
 export class NarrationGenerator {
-  private openai: OpenAI | null = null;
-
-  constructor(apiKey?: string) {
-    const key = apiKey || process.env.OPENAI_API_KEY;
-    if (key && key.trim().length > 0 && !key.includes('your-openai-api-key')) {
-      this.openai = new OpenAI({ apiKey: key });
-    }
-  }
+  constructor() {}
 
   async generateNarration(
     appName: string,
     workflows: WorkflowPlanItem[],
     events: InteractionEvent[]
   ): Promise<NarrationSegment[]> {
-    if (this.openai && events.length > 0) {
+    if (resilientLLM.hasAvailableProvider() && events.length > 0) {
       try {
-        return await this.generateWithOpenAI(appName, workflows, events);
+        return await this.generateWithLLM(appName, workflows, events);
       } catch (err: any) {
-        console.warn(`OpenAI narration generation failed (${err.message}). Using rule-based fallback.`);
+        console.warn(`[NarrationGenerator] Multi-LLM narration generation failed (${err.message}). Using fallback narrator.`);
       }
     }
 
     return this.generateRuleBased(appName, workflows, events);
   }
 
-  private async generateWithOpenAI(
+  private async generateWithLLM(
     appName: string,
     workflows: WorkflowPlanItem[],
     events: InteractionEvent[]
   ): Promise<NarrationSegment[]> {
-    if (!this.openai) throw new Error('OpenAI client not initialized');
-
-    const prompt = `You are a professional voiceover scriptwriter creating narration for an automated software tutorial video.
-Correlate the following observed browser interaction events with the planned workflows.
+    const prompt = `You are a professional software tutorial narrator and onboarding coach.
+Write natural, engaging, professional voiceover narration for an automated video manual.
 
 Application: ${appName}
-Workflows:
+Planned Workflows:
 ${JSON.stringify(workflows, null, 2)}
 
-Recorded Interaction Events:
-${JSON.stringify(events.map((e, idx) => ({ index: idx, type: e.type, elementText: e.elementText, url: e.url })), null, 2)}
+Recorded Browser Interaction Events:
+${JSON.stringify(events.map((e, idx) => ({ index: idx, type: e.type, elementText: e.elementText, url: e.url, workflowId: e.workflowId })), null, 2)}
 
 Requirements:
-1. Tone: Professional, clear, friendly, and instructive.
-2. Focus on explaining what the user sees and accomplishes.
-3. For each workflow, create 1 or 2 concise narration segments.
-4. Reference accurate event indices (startEventIndex and endEventIndex).
+1. Tone: Warm, helpful, clear, and instructive like a top-tier product specialist.
+2. Keep each segment concise (around 12-20 words, ~4-6 seconds of natural speech).
+3. Directly describe the real action taking place (e.g. "To get started with your account, let's navigate to the main dashboard.").
+4. For each workflow, create 1 clear narration segment matching its start and end event indices.
 
 Return a valid JSON object matching:
 {
@@ -66,22 +57,15 @@ Return a valid JSON object matching:
       "workflowId": "string (matching workflow id)",
       "startEventIndex": number,
       "endEventIndex": number,
-      "text": "string (narration speech)"
+      "text": "string (voiceover speech)"
     }
   ]
 }`;
 
-    const response = await this.openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'You produce synchronized tutorial voiceover narration scripts from browser interaction logs.' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.3,
-    });
-
-    const parsed: RawNarrationResponse = JSON.parse(response.choices[0]?.message?.content || '{}');
+    const parsed = await resilientLLM.completeJSON<RawNarrationResponse>(
+      prompt,
+      'You produce synchronized tutorial voiceover narration scripts from browser interaction logs.'
+    );
 
     if (!parsed.segments || parsed.segments.length === 0) {
       return this.generateRuleBased(appName, workflows, events);
@@ -123,7 +107,6 @@ Return a valid JSON object matching:
         .map(e => e.elementText)
         .slice(0, 2);
 
-      // Concise narration matched to visual action duration (~10-14 words, ~4-5s speech)
       let speech = `In ${wf.title},`;
       if (actionSummaries.length > 0) {
         speech += ` notice how you can view ${actionSummaries[0]} and navigate features smoothly.`;

@@ -1,5 +1,5 @@
-import OpenAI from 'openai';
 import { DiscoveryData, ApplicationSection } from '@automanual/shared';
+import { resilientLLM } from './llm-provider';
 
 export interface RawSectionInput {
   name: string;
@@ -12,14 +12,7 @@ export interface RawSectionInput {
 }
 
 export class FeatureSynthesizer {
-  private openai: OpenAI | null = null;
-
-  constructor(apiKey?: string) {
-    const key = apiKey || process.env.OPENAI_API_KEY;
-    if (key && key.trim().length > 0 && !key.includes('your-openai-api-key')) {
-      this.openai = new OpenAI({ apiKey: key });
-    }
-  }
+  constructor() {}
 
   async synthesize(
     appName: string,
@@ -27,27 +20,25 @@ export class FeatureSynthesizer {
     rawSections: RawSectionInput[],
     authRequired: boolean = false
   ): Promise<DiscoveryData> {
-    if (this.openai && rawSections.length > 0) {
+    if (resilientLLM.hasAvailableProvider() && rawSections.length > 0) {
       try {
-        return await this.synthesizeWithOpenAI(appName, baseUrl, rawSections, authRequired);
+        return await this.synthesizeWithLLM(appName, baseUrl, rawSections, authRequired);
       } catch (err: any) {
-        console.warn(`OpenAI feature synthesis failed (${err.message}). Using rule-based synthesizer.`);
+        console.warn(`[FeatureSynthesizer] Multi-LLM synthesis failed (${err.message}). Falling back to rule-based parser.`);
       }
     }
 
     return this.synthesizeRuleBased(appName, baseUrl, rawSections, authRequired);
   }
 
-  private async synthesizeWithOpenAI(
+  private async synthesizeWithLLM(
     appName: string,
     baseUrl: string,
     rawSections: RawSectionInput[],
     authRequired: boolean
   ): Promise<DiscoveryData> {
-    if (!this.openai) throw new Error('OpenAI client not initialized');
-
     const prompt = `You are an expert SaaS technical writer and software analyst.
-Analyze the following discovered web application sections, headings, and interactive elements.
+Analyze the following discovered web application sections, page titles, headings, and interactive elements.
 Produce a structured application map with clean business titles, summaries, and key features for user onboarding.
 
 Application: ${appName}
@@ -69,17 +60,10 @@ Return a valid JSON object matching this schema:
   ]
 }`;
 
-    const response = await this.openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'You convert raw web discovery data into structured software feature maps.' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.2,
-    });
-
-    const parsed = JSON.parse(response.choices[0]?.message?.content || '{}');
+    const parsed = await resilientLLM.completeJSON<any>(
+      prompt,
+      'You convert raw web discovery data into structured software feature maps.'
+    );
 
     return {
       applicationName: parsed.applicationName || appName,
@@ -118,7 +102,6 @@ Return a valid JSON object matching this schema:
         features.push(table.text);
       }
 
-      // Default feature fallback if empty
       if (features.length === 0) {
         features.push(`View and manage ${sec.name.toLowerCase()}`);
       }
