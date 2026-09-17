@@ -21,6 +21,11 @@ export class ProjectsController {
     return this.projectsService.findOne(id);
   }
 
+  @Post(':id/retry')
+  retry(@Param('id') id: string) {
+    return this.projectsService.retry(id);
+  }
+
   @Delete(':id')
   remove(@Param('id') id: string) {
     return this.projectsService.remove(id);

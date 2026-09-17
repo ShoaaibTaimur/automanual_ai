@@ -74,6 +74,51 @@ export class ProjectsService {
     return project;
   }
 
+  async retry(id: string) {
+    const project = await this.findOne(id);
+    if (!project) {
+      throw new NotFoundException(`Project ${id} not found`);
+    }
+
+    this.logger.log(`Received retry request for project ${id} (status: ${project.status})`);
+
+    // Clear previous error message
+    await this.prisma.project.update({
+      where: { id },
+      data: { errorMessage: null },
+    });
+
+    // If discovery or plan is incomplete, retry discovery
+    if (!project.discovery || !project.plan || project.plan.workflows.length === 0) {
+      await this.prisma.project.update({
+        where: { id },
+        data: { status: ProjectStatus.CREATED },
+      });
+
+      setImmediate(async () => {
+        try {
+          this.logger.log(`Retrying discovery for project ${id}...`);
+          await this.discoveryService.discoverProject(id);
+          this.logger.log(`Retrying plan generation for project ${id}...`);
+          await this.plansService.generatePlanForProject(id);
+        } catch (err: any) {
+          this.logger.error(`Retry discovery failed for ${id}: ${err.message}`);
+        }
+      });
+
+      return { message: 'Discovery restarted', status: ProjectStatus.CREATED };
+    } else {
+      // Plan exists, retry pipeline execution
+      await this.prisma.project.update({
+        where: { id },
+        data: { status: ProjectStatus.AWAITING_APPROVAL },
+      });
+
+      await this.plansService.approvePlan(id);
+      return { message: 'Pipeline execution restarted', status: ProjectStatus.EXECUTING };
+    }
+  }
+
   async remove(id: string) {
     await this.findOne(id);
     return this.prisma.project.delete({

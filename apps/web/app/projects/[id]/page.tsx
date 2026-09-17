@@ -25,7 +25,8 @@ import {
   Film,
   Flame,
   Subtitles,
-  ChevronRight
+  ChevronRight,
+  RotateCcw
 } from 'lucide-react';
 
 export default function ProjectDetailsPage() {
@@ -37,6 +38,7 @@ export default function ProjectDetailsPage() {
   const [statusInfo, setStatusInfo] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [approving, setApproving] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'video' | 'workflows' | 'routes'>('video');
   const [copied, setCopied] = useState(false);
@@ -145,6 +147,22 @@ export default function ProjectDetailsPage() {
     }
   };
 
+  const handleRetryPipeline = async () => {
+    setRetrying(true);
+    setError(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/projects/${projectId}/retry`, {
+        method: 'POST',
+      });
+      if (!res.ok) throw new Error('Failed to restart pipeline');
+      await fetchProjectData();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setRetrying(false);
+    }
+  };
+
   const handleSeek = (timeInSeconds: number) => {
     if (videoRef.current) {
       videoRef.current.currentTime = timeInSeconds;
@@ -216,9 +234,9 @@ export default function ProjectDetailsPage() {
       {/* Sticky Header */}
       <header className="border-b border-slate-800/80 backdrop-blur-md sticky top-0 z-50 bg-[#030712]/80">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <a href="/" className="flex items-center gap-2 text-slate-400 hover:text-white text-xs font-medium transition">
-              ← Dashboard
+          <div className="flex items-center gap-4">
+            <a href="/projects" className="flex items-center gap-2 text-slate-400 hover:text-white text-xs font-medium transition">
+              ← Projects Library
             </a>
             <span className="text-slate-700">/</span>
             <div className="flex items-center gap-2.5">
@@ -226,6 +244,8 @@ export default function ProjectDetailsPage() {
               <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-semibold tracking-wide uppercase border ${
                 project.status === 'COMPLETED' 
                   ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                  : project.status === 'FAILED'
+                  ? 'bg-rose-500/10 text-rose-300 border-rose-500/30'
                   : project.status.includes('ING')
                   ? 'bg-indigo-500/10 text-indigo-300 border-indigo-500/30 animate-pulse'
                   : 'bg-slate-800 text-slate-300 border-slate-700'
@@ -236,6 +256,15 @@ export default function ProjectDetailsPage() {
           </div>
 
           <div className="flex items-center gap-4 text-xs">
+            <nav className="hidden sm:flex items-center gap-1 border-r border-slate-800 pr-4">
+              <a href="/" className="px-2.5 py-1 rounded-lg text-slate-400 hover:text-white transition">
+                New Project
+              </a>
+              <a href="/projects" className="px-2.5 py-1 rounded-lg text-slate-400 hover:text-white transition">
+                Library
+              </a>
+            </nav>
+
             <a 
               href={project.baseUrl} 
               target="_blank" 
@@ -251,6 +280,34 @@ export default function ProjectDetailsPage() {
       </header>
 
       <div className="max-w-6xl mx-auto px-6 pt-8 relative z-10">
+        {/* Prominent Failure Banner with Rerun Action */}
+        {(project.status === 'FAILED' || project.errorMessage) && (
+          <div className="mb-6 p-5 rounded-2xl bg-rose-950/40 border border-rose-500/40 shadow-2xl backdrop-blur-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-xl bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0 mt-0.5">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white mb-1">
+                  Generation Attempt Failed
+                </h3>
+                <p className="text-xs text-rose-300/90 leading-relaxed max-w-2xl">
+                  {project.errorMessage || 'An error occurred during autonomous exploration or video rendering. You can retry the pipeline without creating a new project.'}
+                </p>
+              </div>
+            </div>
+
+            <button
+              onClick={handleRetryPipeline}
+              disabled={retrying}
+              className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs transition shadow-lg shadow-rose-600/30 flex items-center gap-2 disabled:opacity-50 shrink-0"
+            >
+              <RotateCcw className={`w-4 h-4 ${retrying ? 'animate-spin' : ''}`} />
+              <span>{retrying ? 'Rerunning Pipeline...' : 'Rerun Failed Attempt'}</span>
+            </button>
+          </div>
+        )}
+
         {error && (
           <div className="mb-6 p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center gap-2">
             <AlertCircle className="w-4 h-4 shrink-0" />
