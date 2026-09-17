@@ -1,0 +1,129 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum ProjectStatus {
+  CREATED
+  DISCOVERING
+  PLAN_READY
+  AWAITING_APPROVAL
+  EXECUTING
+  RECORDING
+  GENERATING_NARRATION
+  GENERATING_VOICE
+  RENDERING_VIDEO
+  COMPLETED
+  FAILED
+}
+
+model Project {
+  id                    String            @id @default(uuid())
+  name                  String
+  baseUrl               String
+  authRequired          Boolean           @default(false)
+  credentialsEncrypted  String?
+  status                ProjectStatus     @default(CREATED)
+  errorMessage          String?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  discovery             Discovery?
+  plan                  Plan?
+  recordings            Recording[]
+  narrations            NarrationSegment[]
+  videoRenders          VideoRender[]
+
+  @@map("projects")
+}
+
+model Discovery {
+  id              String    @id @default(uuid())
+  projectId       String    @unique
+  project         Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  rawJson         Json
+  sections        Json
+  screenshotPaths String[]  @default([])
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@map("discoveries")
+}
+
+model Plan {
+  id                String      @id @default(uuid())
+  projectId         String      @unique
+  project           Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title             String
+  estimatedDuration Int
+  rawJson           Json
+  approved          Boolean     @default(false)
+  approvedAt        DateTime?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  workflows         Workflow[]
+
+  @@map("plans")
+}
+
+model Workflow {
+  id          String   @id @default(uuid())
+  planId      String
+  plan        Plan     @relation(fields: [planId], references: [id], onDelete: Cascade)
+  workflowId  String
+  title       String
+  priority    Int
+  stepsJson   Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("workflows")
+}
+
+model Recording {
+  id              String   @id @default(uuid())
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  videoPath       String?
+  rawEventsJson   Json?
+  durationSeconds Float?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("recordings")
+}
+
+model NarrationSegment {
+  id              String   @id @default(uuid())
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowId      String
+  startEventIndex Int
+  endEventIndex   Int
+  text            String
+  audioPath       String?
+  durationSeconds Float?
+  startTime       Float?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("narration_segments")
+}
+
+model VideoRender {
+  id           String        @id @default(uuid())
+  projectId    String
+  project      Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  status       ProjectStatus @default(RENDERING_VIDEO)
+  outputUrl    String?
+  progress     Int           @default(0)
+  errorMessage String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@map("video_renders")
+}
