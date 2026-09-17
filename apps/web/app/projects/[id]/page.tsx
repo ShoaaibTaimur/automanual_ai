@@ -84,10 +84,13 @@ export default function ProjectDetailsPage() {
     fetchProjectData();
   }, [projectId]);
 
-  // Polling status when in active pipeline
+  // Polling status when in active pipeline or discovery
   useEffect(() => {
     if (!project) return;
     const activeStatuses = [
+      'CREATED',
+      'DISCOVERING',
+      'PLAN_READY',
       'EXECUTING',
       'RECORDING',
       'GENERATING_NARRATION',
@@ -99,15 +102,21 @@ export default function ProjectDetailsPage() {
 
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${apiUrl}/api/projects/${projectId}/status`);
+        const res = await fetch(`${apiUrl}/api/projects/${projectId}`);
         if (res.ok) {
-          const s = await res.json();
-          setStatusInfo(s);
-          setProject((prev: any) => ({ ...prev, status: s.status }));
-          if (s.status === 'COMPLETED' || s.status === 'FAILED') {
-            clearInterval(interval);
-            await fetchProjectData();
+          const updated = await res.json();
+          setProject(updated);
+          if (updated.plan) {
+            setPlan(updated.plan);
           }
+          if (updated.status === 'COMPLETED' || updated.status === 'FAILED') {
+            clearInterval(interval);
+          }
+        }
+        const sRes = await fetch(`${apiUrl}/api/projects/${projectId}/status`);
+        if (sRes.ok) {
+          const s = await sRes.json();
+          setStatusInfo(s);
         }
       } catch {
         // Silent poll error
@@ -606,6 +615,20 @@ export default function ProjectDetailsPage() {
                       )}
                     </button>
                   )}
+                </div>
+              </div>
+            ) : project.status === 'CREATED' || project.status === 'DISCOVERING' || project.status === 'PLAN_READY' ? (
+              <div className="p-12 rounded-2xl bg-indigo-950/20 border border-indigo-500/30 text-center space-y-3 backdrop-blur-sm">
+                <div className="w-10 h-10 rounded-xl bg-indigo-500/10 text-indigo-400 flex items-center justify-center mx-auto border border-indigo-500/20 animate-pulse">
+                  <Bot className="w-5 h-5 animate-bounce" />
+                </div>
+                <h4 className="font-bold text-white text-sm">Autonomous Crawler Exploring Application</h4>
+                <p className="text-slate-400 text-xs max-w-md mx-auto leading-relaxed">
+                  Chromium agent is visiting <span className="text-indigo-300 font-mono">{project.baseUrl}</span>, crawling routes, discovering forms and actions, and sequencing demonstration workflows...
+                </p>
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900 border border-slate-800 text-[11px] text-slate-400">
+                  <Activity className="w-3.5 h-3.5 text-indigo-400 animate-spin" />
+                  <span>Discovery in progress — plan will display automatically</span>
                 </div>
               </div>
             ) : (
