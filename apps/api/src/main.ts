@@ -1,6 +1,8 @@
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { ValidationPipe, Logger } from '@nestjs/common';
+import fastifyStatic from '@fastify/static';
+import * as path from 'path';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
@@ -9,6 +11,12 @@ async function bootstrap() {
     AppModule,
     new FastifyAdapter({ logger: false })
   );
+
+  await app.register(fastifyStatic as any, {
+    root: path.resolve(process.cwd(), 'storage'),
+    prefix: '/storage/',
+    decorateReply: false,
+  });
 
   app.enableCors({
     origin: '*',
