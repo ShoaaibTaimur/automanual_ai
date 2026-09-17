@@ -45,17 +45,17 @@ export class LoginManager {
       // Click submit or press Enter
       if (detection.submitSelector && await page.$(detection.submitSelector)) {
         await Promise.all([
-          page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 }).catch(() => {}),
+          page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {}),
           page.click(detection.submitSelector),
         ]);
       } else {
         await Promise.all([
-          page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 }).catch(() => {}),
+          page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {}),
           page.keyboard.press('Enter'),
         ]);
       }
 
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(3000);
 
       // Check if still stuck on login form
       const postDetection = await this.detector.detect(page);

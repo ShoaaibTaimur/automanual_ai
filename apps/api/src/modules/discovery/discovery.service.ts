@@ -68,7 +68,8 @@ export class DiscoveryService {
           viewport: { width: 1920, height: 1080 },
         });
 
-        await authPage.goto(project.baseUrl, { waitUntil: 'networkidle', timeout: 30000 });
+        await authPage.goto(project.baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await authPage.waitForTimeout(3000);
         const loginResult = await this.loginManager.login(runner, authPage, {
           username,
           password,

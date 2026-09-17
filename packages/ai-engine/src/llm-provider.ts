@@ -7,11 +7,6 @@ export interface LLMProviderConfig {
   model: string;
 }
 
-export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
-}
-
 export class ResilientLLM {
   private providers: LLMProviderConfig[] = [];
   private clients: Map<string, OpenAI> = new Map();
@@ -28,27 +23,27 @@ export class ResilientLLM {
     const groqKey = process.env.GROQ_API_KEY?.trim();
     const openaiKey = process.env.OPENAI_API_KEY?.trim();
 
-    // 1. Google Gemini (Free tier, fast, high quality)
+    // 1. Google Gemini (Free tier via aistudio.google.com)
     if (geminiKey && geminiKey.length > 5 && !geminiKey.includes('your-')) {
       this.providers.push({
         name: 'gemini',
         apiKey: geminiKey,
         baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-        model: 'gemini-1.5-flash',
+        model: 'gemini-3.6-flash',
       });
     }
 
-    // 2. Groq (Free tier, ultra-fast Llama 3.3)
+    // 2. Groq (Free tier via console.groq.com)
     if (groqKey && groqKey.length > 5 && !groqKey.includes('your-')) {
       this.providers.push({
         name: 'groq',
         apiKey: groqKey,
         baseURL: 'https://api.groq.com/openai/v1',
-        model: 'llama-3.3-70b-versatile',
+        model: 'openai/gpt-oss-120b',
       });
     }
 
-    // 3. OpenAI (Standard fallback if key supplied)
+    // 3. OpenAI (Optional paid fallback)
     if (openaiKey && openaiKey.length > 5 && !openaiKey.includes('your-')) {
       this.providers.push({
         name: 'openai',
@@ -125,13 +120,6 @@ export class ResilientLLM {
       } catch (err: any) {
         lastError = err;
         const errMsg = err.message || String(err);
-        const isRateLimitOrQuota = 
-          errMsg.includes('429') || 
-          errMsg.toLowerCase().includes('quota') || 
-          errMsg.toLowerCase().includes('rate limit') || 
-          errMsg.toLowerCase().includes('resource_exhausted') ||
-          errMsg.toLowerCase().includes('tokens per minute') ||
-          errMsg.toLowerCase().includes('credit');
 
         console.warn(
           `[AI Engine Fallback] Provider ${provider.name.toUpperCase()} encountered an issue (${errMsg}). ` +

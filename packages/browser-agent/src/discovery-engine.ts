@@ -137,7 +137,8 @@ export class DiscoveryEngine {
     const maxRoutes = options.maxRoutes || 6;
 
     // Start on home / dashboard page
-    await page.goto(baseUrl, { waitUntil: 'networkidle', timeout: 25000 }).catch(() => {});
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+    await page.waitForTimeout(3000);
 
     const navLinks = await this.extractNavigationLinks(page, baseUrl);
     const routesToVisit = [
@@ -150,7 +151,8 @@ export class DiscoveryEngine {
     for (const route of routesToVisit) {
       try {
         if (page.url() !== route.url) {
-          await page.goto(route.url, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+          await page.goto(route.url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+          await page.waitForTimeout(2000);
         }
 
         const title = await page.title().catch(() => route.label);

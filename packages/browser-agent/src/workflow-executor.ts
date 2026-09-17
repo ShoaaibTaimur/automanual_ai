@@ -130,7 +130,8 @@ export class WorkflowExecutor {
           : new URL(step.target || '/', baseUrl).toString();
 
         if (page.url() !== targetUrl) {
-          await page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 20000 }).catch(() => {});
+          await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 35000 }).catch(() => {});
+          await page.waitForTimeout(2000);
         }
 
         this.eventLogger.logEvent({

@@ -148,7 +148,8 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
 
           const loginRunner = new BrowserRunner();
           const loginPage = await loginRunner.launch({ viewport: { width: 1920, height: 1080 } });
-          await loginPage.goto(project.baseUrl, { waitUntil: 'networkidle', timeout: 30000 });
+          await loginPage.goto(project.baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+          await loginPage.waitForTimeout(3000);
           await this.loginManager.login(loginRunner, loginPage, {
             username,
             password,
