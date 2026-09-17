@@ -23,23 +23,23 @@ export class ResilientLLM {
     const groqKey = process.env.GROQ_API_KEY?.trim();
     const openaiKey = process.env.OPENAI_API_KEY?.trim();
 
-    // 1. Google Gemini (Free tier via aistudio.google.com)
-    if (geminiKey && geminiKey.length > 5 && !geminiKey.includes('your-')) {
-      this.providers.push({
-        name: 'gemini',
-        apiKey: geminiKey,
-        baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-        model: 'gemini-3.6-flash',
-      });
-    }
-
-    // 2. Groq (Free tier via console.groq.com)
+    // 1. Groq (Free tier — confirmed working models: openai/gpt-oss-120b)
     if (groqKey && groqKey.length > 5 && !groqKey.includes('your-')) {
       this.providers.push({
         name: 'groq',
         apiKey: groqKey,
         baseURL: 'https://api.groq.com/openai/v1',
         model: 'openai/gpt-oss-120b',
+      });
+    }
+
+    // 2. Google Gemini (Free tier — requires a valid AIza... key from aistudio.google.com)
+    if (geminiKey && geminiKey.length > 5 && !geminiKey.includes('your-') && geminiKey.startsWith('AIza')) {
+      this.providers.push({
+        name: 'gemini',
+        apiKey: geminiKey,
+        baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+        model: 'gemini-1.5-flash',
       });
     }
 
@@ -63,70 +63,92 @@ export class ResilientLLM {
   }
 
   public hasAvailableProvider(): boolean {
+    this.refreshProviders();
     return this.providers.length > 0;
   }
 
   public getActiveProviders(): string[] {
+    this.refreshProviders();
     return this.providers.map(p => `${p.name} (${p.model})`);
   }
 
   /**
    * Execute chat completion requesting JSON with automatic failover across providers.
-   * If Gemini rate limits or quotas out (429/quota/5xx), it seamlessly falls back to Groq, and vice-versa.
+   * Always refreshes provider list to pick up env vars set after module init.
    */
   async completeJSON<T>(
     prompt: string,
     systemPrompt: string = 'You produce structured JSON responses.',
     temperature: number = 0.2
   ): Promise<T> {
-    if (this.providers.length === 0) {
-      this.refreshProviders();
-    }
+    // Always refresh — NestJS ConfigModule sets env vars after module init,
+    // so the singleton may have loaded with empty env. Refresh is cheap.
+    this.refreshProviders();
 
     if (this.providers.length === 0) {
-      throw new Error('No AI provider configured. Provide GEMINI_API_KEY or GROQ_API_KEY or OPENAI_API_KEY in .env.');
+      throw new Error('No AI provider configured. Set GEMINI_API_KEY or GROQ_API_KEY in .env.');
     }
 
     let lastError: Error | null = null;
 
-    // Try each provider in sequence
+    // Try each provider in sequence, with exponential backoff for rate-limit errors
     for (let i = 0; i < this.providers.length; i++) {
       const provider = this.providers[i];
       const client = this.clients.get(provider.name);
 
       if (!client) continue;
 
-      try {
-        console.log(`[AI Engine] Invoking provider: ${provider.name.toUpperCase()} (model: ${provider.model})...`);
+      const MAX_RETRIES = 3;
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        try {
+          console.log(
+            `[AI Engine] Invoking provider: ${provider.name.toUpperCase()} (model: ${provider.model})` +
+            (attempt > 0 ? ` [retry ${attempt}/${MAX_RETRIES - 1}]` : '') + '...'
+          );
 
-        const response = await client.chat.completions.create({
-          model: provider.model,
-          response_format: { type: 'json_object' },
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: prompt },
-          ],
-          temperature,
-        });
+          const response = await client.chat.completions.create({
+            model: provider.model,
+            response_format: { type: 'json_object' },
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: prompt },
+            ],
+            temperature,
+          });
 
-        const rawContent = response.choices[0]?.message?.content;
-        if (!rawContent) {
-          throw new Error(`Empty content returned by provider ${provider.name}`);
+          const rawContent = response.choices[0]?.message?.content;
+          if (!rawContent) {
+            throw new Error(`Empty content returned by provider ${provider.name}`);
+          }
+
+          const parsed = JSON.parse(rawContent) as T;
+          console.log(`[AI Engine] ✓ Success with ${provider.name.toUpperCase()} (model: ${provider.model})!`);
+          return parsed;
+        } catch (err: any) {
+          lastError = err;
+          const errMsg: string = err.message || String(err);
+          const status: number = err.status || err.response?.status || 0;
+          const isRateLimit = status === 429 || /rate.?limit|quota|too many/i.test(errMsg);
+
+          if (isRateLimit && attempt < MAX_RETRIES - 1) {
+            // Exponential backoff: 1s, 2s, 4s
+            const backoffMs = Math.pow(2, attempt) * 1000;
+            console.warn(
+              `[AI Engine] ${provider.name.toUpperCase()} rate-limited. Backing off ${backoffMs}ms before retry ${attempt + 1}/${MAX_RETRIES - 1}...`
+            );
+            await new Promise(r => setTimeout(r, backoffMs));
+            continue;
+          }
+
+          // Non-retriable error or exhausted retries → failover to next provider
+          console.warn(
+            `[AI Engine Fallback] Provider ${provider.name.toUpperCase()} failed (${errMsg}). ` +
+            (i < this.providers.length - 1
+              ? `Failing over to ${this.providers[i + 1].name.toUpperCase()}...`
+              : `No remaining providers.`)
+          );
+          break; // Break inner retry loop, try next provider
         }
-
-        const parsed = JSON.parse(rawContent) as T;
-        console.log(`[AI Engine] Success with ${provider.name.toUpperCase()}!`);
-        return parsed;
-      } catch (err: any) {
-        lastError = err;
-        const errMsg = err.message || String(err);
-
-        console.warn(
-          `[AI Engine Fallback] Provider ${provider.name.toUpperCase()} encountered an issue (${errMsg}). ` +
-          (i < this.providers.length - 1
-            ? `Automatically failing over to ${this.providers[i + 1].name.toUpperCase()}...`
-            : `No remaining providers to failover to.`)
-        );
       }
     }
 

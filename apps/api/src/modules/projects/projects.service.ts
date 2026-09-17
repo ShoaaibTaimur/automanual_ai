@@ -3,6 +3,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { DiscoveryService } from '../discovery/discovery.service';
 import { PlansService } from '../plans/plans.service';
 import { CreateProjectDto, ProjectStatus } from '@automanual/shared';
+import * as fs from 'fs';
+import * as path from 'path';
 
 @Injectable()
 export class ProjectsService {
@@ -76,47 +78,52 @@ export class ProjectsService {
 
   async retry(id: string) {
     const project = await this.findOne(id);
-    if (!project) {
-      throw new NotFoundException(`Project ${id} not found`);
+
+    this.logger.log(`Full reset retry for project ${id} (current status: ${project.status})`);
+
+    // 1. Wipe all child DB records so pipeline runs clean
+    await this.prisma.narrationSegment.deleteMany({ where: { projectId: id } });
+    await this.prisma.recording.deleteMany({ where: { projectId: id } });
+    await this.prisma.videoRender.deleteMany({ where: { projectId: id } });
+
+    // Delete plan workflows then the plan itself
+    if (project.plan) {
+      await this.prisma.workflow.deleteMany({ where: { planId: project.plan.id } });
+      await this.prisma.plan.delete({ where: { id: project.plan.id } }).catch(() => {});
     }
 
-    this.logger.log(`Received retry request for project ${id} (status: ${project.status})`);
+    // Delete discovery record
+    if (project.discovery) {
+      await this.prisma.discovery.delete({ where: { id: project.discovery.id } }).catch(() => {});
+    }
 
-    // Clear previous error message
+    // 2. Wipe storage directory (recordings, renders, audio, screenshots, etc.)
+    const storageBase = process.env.STORAGE_PATH || './storage';
+    const projectStorageDir = path.resolve(storageBase, 'projects', id);
+    if (fs.existsSync(projectStorageDir)) {
+      fs.rmSync(projectStorageDir, { recursive: true, force: true });
+      this.logger.log(`Cleared storage dir: ${projectStorageDir}`);
+    }
+
+    // 3. Reset project status and clear error
     await this.prisma.project.update({
       where: { id },
-      data: { errorMessage: null },
+      data: { status: ProjectStatus.CREATED, errorMessage: null },
     });
 
-    // If discovery or plan is incomplete, retry discovery
-    if (!project.discovery || !project.plan || project.plan.workflows.length === 0) {
-      await this.prisma.project.update({
-        where: { id },
-        data: { status: ProjectStatus.CREATED },
-      });
+    // 4. Re-run full pipeline from scratch
+    setImmediate(async () => {
+      try {
+        this.logger.log(`Re-running discovery for project ${id}...`);
+        await this.discoveryService.discoverProject(id);
+        this.logger.log(`Re-running plan generation for project ${id}...`);
+        await this.plansService.generatePlanForProject(id);
+      } catch (err: any) {
+        this.logger.error(`Retry pipeline failed for ${id}: ${err.message}`);
+      }
+    });
 
-      setImmediate(async () => {
-        try {
-          this.logger.log(`Retrying discovery for project ${id}...`);
-          await this.discoveryService.discoverProject(id);
-          this.logger.log(`Retrying plan generation for project ${id}...`);
-          await this.plansService.generatePlanForProject(id);
-        } catch (err: any) {
-          this.logger.error(`Retry discovery failed for ${id}: ${err.message}`);
-        }
-      });
-
-      return { message: 'Discovery restarted', status: ProjectStatus.CREATED };
-    } else {
-      // Plan exists, retry pipeline execution
-      await this.prisma.project.update({
-        where: { id },
-        data: { status: ProjectStatus.AWAITING_APPROVAL },
-      });
-
-      await this.plansService.approvePlan(id);
-      return { message: 'Pipeline execution restarted', status: ProjectStatus.EXECUTING };
-    }
+    return { message: 'Project fully reset and pipeline restarted from scratch', status: ProjectStatus.CREATED };
   }
 
   async remove(id: string) {

@@ -24,6 +24,9 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
   private aiEngine = new AiEngine();
   private videoRenderer = new RemotionVideoRenderer();
 
+  // Projects that have been requested to cancel
+  private cancelledProjectIds = new Set<string>();
+
   constructor(private readonly prisma: PrismaService) {}
 
   async onModuleInit() {
@@ -69,6 +72,8 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
 
   async startGenerationPipeline(projectId: string) {
     this.logger.log(`Enqueueing manual generation pipeline for project ${projectId}...`);
+    // Clear any previous cancel flag when starting fresh
+    this.cancelledProjectIds.delete(projectId);
 
     if (this.queue) {
       const job = await this.queue.add('execute-workflow-pipeline', { projectId }, {
@@ -82,6 +87,27 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /** Cancel a running project pipeline. Safe to call at any time. */
+  async cancelProject(projectId: string): Promise<void> {
+    this.cancelledProjectIds.add(projectId);
+    this.logger.log(`Cancel requested for project ${projectId}`);
+
+    await this.prisma.project.update({
+      where: { id: projectId },
+      data: {
+        status: ProjectStatus.FAILED,
+        errorMessage: 'Pipeline cancelled by user.',
+      },
+    }).catch(() => {});
+  }
+
+  private checkCancelled(projectId: string) {
+    if (this.cancelledProjectIds.has(projectId)) {
+      this.cancelledProjectIds.delete(projectId);
+      throw new Error('CANCELLED');
+    }
+  }
+
   private async processGenerationJob(job: Job<GenerationJobData>) {
     const { projectId } = job.data;
     await this.processPipelineDirect(projectId, job);
@@ -90,6 +116,28 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
   private async processPipelineDirect(projectId: string, job?: Job<GenerationJobData>) {
     try {
       this.logger.log(`Starting autonomous execution pipeline for project ${projectId}...`);
+
+      // ─── Timing bookkeeping ──────────────────────────────────────────────────
+      const pipelineStart = Date.now();
+      const stageTimings: Record<string, { startMs: number; endMs?: number; durationMs?: number }> = {};
+
+      const startStage = (stage: string) => {
+        stageTimings[stage] = { startMs: Date.now() };
+      };
+
+      const endStage = (stage: string) => {
+        const s = stageTimings[stage];
+        if (s) {
+          s.endMs = Date.now();
+          s.durationMs = s.endMs - s.startMs;
+          const secs = Math.round(s.durationMs / 1000);
+          const min = Math.floor(secs / 60);
+          const sec = secs % 60;
+          const humanTime = min > 0 ? `${min}m ${sec}s` : `${sec}s`;
+          this.logger.log(`[Stage: ${stage}] completed in ${humanTime}`);
+        }
+      };
+      // ────────────────────────────────────────────────────────────────────────
 
       const project = await this.prisma.project.findUnique({
         where: { id: projectId },
@@ -105,6 +153,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
       }
 
       // Stage 1: EXECUTING
+      startStage('discovery');
       await this.updateStatus(projectId, ProjectStatus.EXECUTING, 15, job);
 
       const storageBase = process.env.STORAGE_PATH || './storage';
@@ -124,44 +173,13 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
         })),
       };
 
-      // Stage 2: RECORDING (Execute real workflows and record browser video)
+      // Stage 2: RECORDING
+      this.checkCancelled(projectId);
+      endStage('discovery');
+      startStage('recording');
       await this.updateStatus(projectId, ProjectStatus.RECORDING, 35, job);
 
-      // Verify or create authenticated session if required
-      if (project.authRequired && project.credentialsEncrypted && !fs.existsSync(sessionPath)) {
-        try {
-          this.logger.log(`Project requires auth and session missing. Logging in before video recording...`);
-          let username = '';
-          let password = '';
-          const secretKey = process.env.ENCRYPTION_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-
-          if (project.credentialsEncrypted.startsWith('enc:')) {
-            const parts = project.credentialsEncrypted.replace('enc:', '').split(':');
-            username = parts[0] || '';
-            password = parts[1] || '';
-          } else {
-            const decrypted = decryptCredentials(project.credentialsEncrypted, secretKey);
-            const parsed = JSON.parse(decrypted);
-            username = parsed.username || '';
-            password = parsed.password || '';
-          }
-
-          const loginRunner = new BrowserRunner();
-          const loginPage = await loginRunner.launch({ viewport: { width: 1920, height: 1080 } });
-          await loginPage.goto(project.baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-          await loginPage.waitForTimeout(3000);
-          await this.loginManager.login(loginRunner, loginPage, {
-            username,
-            password,
-            storageStatePath: sessionPath,
-          });
-          await loginRunner.close();
-          this.logger.log(`Session initialized for recording at ${sessionPath}`);
-        } catch (authErr: any) {
-          this.logger.warn(`Recording pre-auth failed: ${authErr.message}`);
-        }
-      }
-
+      // Session from discovery phase is reused — no second login needed
       this.logger.log(`Executing ${planData.workflows.length} workflows in Chromium at 1920x1080...`);
 
       const executionResult = await this.workflowExecutor.executePlan(
@@ -185,7 +203,10 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
         },
       });
 
-      // Stage 3: GENERATING_NARRATION (Synthesize observed narration segments)
+      // Stage 3: GENERATING_NARRATION
+      this.checkCancelled(projectId);
+      endStage('recording');
+      startStage('narration');
       await this.updateStatus(projectId, ProjectStatus.GENERATING_NARRATION, 55, job);
       this.logger.log(`Generating narration script for ${project.name}...`);
 
@@ -215,6 +236,8 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`Saved ${savedDbSegments.length} narration segments to database.`);
 
       // Stage 4: GENERATING_VOICE (Synthesize audio files & timing metadata)
+      endStage('narration');
+      startStage('voice');
       await this.updateStatus(projectId, ProjectStatus.GENERATING_VOICE, 75, job);
       this.logger.log(`Generating voiceover audio files for ${project.name}...`);
 
@@ -246,6 +269,9 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`Saved synchronized timeline with ${timeline.length} items to ${timelinePath}`);
 
       // Stage 5: RENDERING_VIDEO
+      this.checkCancelled(projectId);
+      endStage('voice');
+      startStage('rendering');
       await this.updateStatus(projectId, ProjectStatus.RENDERING_VIDEO, 85, job);
       this.logger.log(`Rendering final studio tutorial MP4 for ${project.name}...`);
 
@@ -316,9 +342,32 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
       }
 
       // Stage 6: COMPLETED
+      endStage('rendering');
       await this.updateStatus(projectId, ProjectStatus.COMPLETED, 100, job);
-      this.logger.log(`Pipeline fully completed for project ${projectId}.`);
+
+      // Persist timing data to timings.json
+      const totalMs = Date.now() - pipelineStart;
+      const timingsData = {
+        startedAt: new Date(pipelineStart).toISOString(),
+        completedAt: new Date().toISOString(),
+        totalMs,
+        stages: {
+          discoveryMs: stageTimings.discovery?.durationMs ?? 0,
+          recordingMs: stageTimings.recording?.durationMs ?? 0,
+          narrationMs: stageTimings.narration?.durationMs ?? 0,
+          voiceMs: stageTimings.voice?.durationMs ?? 0,
+          renderingMs: stageTimings.rendering?.durationMs ?? 0,
+        },
+      };
+      const timingsPath = path.join(projectStorageDir, 'timings.json');
+      fs.writeFileSync(timingsPath, JSON.stringify(timingsData, null, 2), 'utf8');
+      this.logger.log(`Pipeline fully completed for project ${projectId}. Total time: ${Math.round(totalMs / 1000)}s. Timings saved to ${timingsPath}`);
     } catch (err: any) {
+      if (err.message === 'CANCELLED') {
+        this.logger.log(`Pipeline cancelled for project ${projectId}.`);
+        // Status already set by cancelProject()
+        return;
+      }
       this.logger.error(`Pipeline error for ${projectId}: ${err.message}`);
       await this.prisma.project.update({
         where: { id: projectId },

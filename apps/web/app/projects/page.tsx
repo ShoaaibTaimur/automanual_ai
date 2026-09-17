@@ -16,7 +16,8 @@ import {
   ChevronRight,
   Plus,
   CheckCircle2,
-  Activity
+  Activity,
+  XCircle
 } from 'lucide-react';
 
 export default function ProjectsLibraryPage() {
@@ -26,6 +27,7 @@ export default function ProjectsLibraryPage() {
   const [filter, setFilter] = useState<'all' | 'completed' | 'active' | 'failed'>('all');
   const [currentPage, setCurrentPage] = useState(1);
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
 
   const pageSize = 6;
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4001';
@@ -64,6 +66,23 @@ export default function ProjectsLibraryPage() {
       // Silent error
     } finally {
       setRetryingId(null);
+    }
+  };
+
+  const handleCancel = async (e: React.MouseEvent, projectId: string) => {
+    e.stopPropagation();
+    setCancellingId(projectId);
+    try {
+      const res = await fetch(`${apiUrl}/api/projects/${projectId}/cancel`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        await fetchProjects();
+      }
+    } catch {
+      // Silent error
+    } finally {
+      setCancellingId(null);
     }
   };
 
@@ -282,6 +301,18 @@ export default function ProjectsLibraryPage() {
                     </div>
 
                     <div className="flex items-center gap-2">
+                      {['DISCOVERING', 'EXECUTING', 'RECORDING', 'GENERATING_NARRATION', 'GENERATING_VOICE', 'RENDERING_VIDEO'].includes(proj.status) && (
+                        <button
+                          type="button"
+                          onClick={(e) => handleCancel(e, proj.id)}
+                          disabled={cancellingId === proj.id}
+                          className="px-2 py-0.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-semibold transition flex items-center gap-1"
+                          title="Cancel pipeline"
+                        >
+                          <XCircle className="w-3 h-3" />
+                          <span>{cancellingId === proj.id ? 'Cancelling...' : 'Cancel'}</span>
+                        </button>
+                      )}
                       {proj.status === 'FAILED' ? (
                         <button
                           type="button"

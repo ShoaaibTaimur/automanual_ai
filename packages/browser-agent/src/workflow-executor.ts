@@ -46,16 +46,74 @@ export class WorkflowExecutor {
       viewport: { width: 1920, height: 1080 },
       recordVideoDir: recordingsDir,
       storageStatePath: options.storageStatePath,
-      slowMo: 100,
+      slowMo: 150,
+    });
+
+    // Inject visible animated mouse cursor element so Playwright video recording captures cursor
+    await page.addInitScript(() => {
+      const cursor = document.createElement('div');
+      cursor.id = '__automanual_cursor';
+      cursor.style.position = 'fixed';
+      cursor.style.top = '0';
+      cursor.style.left = '0';
+      cursor.style.pointerEvents = 'none';
+      cursor.style.zIndex = '2147483647';
+      cursor.style.transform = 'translate(-100px, -100px)';
+      cursor.style.transition = 'transform 0.05s ease-out';
+      cursor.innerHTML = `
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="#6366f1" stroke="white" stroke-width="1.5" style="filter: drop-shadow(0 2px 6px rgba(0,0,0,0.6));">
+          <path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/>
+        </svg>
+      `;
+
+      const attach = () => {
+        if (!document.getElementById('__automanual_cursor') && document.body) {
+          document.body.appendChild(cursor);
+        }
+      };
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', attach);
+      } else {
+        attach();
+      }
+
+      window.addEventListener('mousemove', (e) => {
+        attach();
+        cursor.style.transform = `translate(${e.clientX}px, ${e.clientY}px)`;
+      });
+
+      window.addEventListener('mousedown', () => {
+        attach();
+        cursor.style.transform += ' scale(0.8)';
+      });
+
+      window.addEventListener('mouseup', () => {
+        attach();
+      });
     });
 
     try {
       // Initial landing navigation
-      await page.goto(baseUrl, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+      await page.waitForTimeout(4000); // wait for SPA hydration
+
+      // Position mouse initially at center
+      await page.mouse.move(960, 540, { steps: 5 });
+
+      // Verify we're NOT stuck on a login page after session restore
+      const landingUrl = page.url();
+      const onLoginPage = /login|signin|auth/i.test(new URL(landingUrl).pathname);
+      if (onLoginPage) {
+        console.warn(`[WorkflowExecutor] WARNING: Session load landed on login page (${landingUrl}). Workflows will run from login context.`);
+      } else {
+        console.log(`[WorkflowExecutor] Authenticated landing: ${landingUrl}`);
+      }
+
       this.eventLogger.logEvent({
         type: 'navigate',
         url: page.url(),
-        elementText: 'Initial page load',
+        elementText: 'Application loaded',
       });
 
       const maxWorkflows = options.maxWorkflows || plan.workflows.length;
@@ -125,13 +183,63 @@ export class WorkflowExecutor {
 
     try {
       if (action === 'navigate') {
+        const effectiveOrigin = (() => {
+          try {
+            const cur = page.url();
+            return (cur && cur !== 'about:blank') ? new URL(cur).origin : new URL(baseUrl).origin;
+          } catch {
+            return baseUrl;
+          }
+        })();
+
         const targetUrl = step.target?.startsWith('http')
           ? step.target
-          : new URL(step.target || '/', baseUrl).toString();
+          : new URL(step.target || '/', effectiveOrigin).toString();
 
         if (page.url() !== targetUrl) {
-          await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 35000 }).catch(() => {});
-          await page.waitForTimeout(2000);
+          let clickedLink = false;
+          try {
+            const targetPath = new URL(targetUrl).pathname;
+            // Search for visible navigation links matching target
+            const linkLocators = [
+              page.locator(`nav a[href*="${targetPath}"], aside a[href*="${targetPath}"]`).first(),
+              page.locator(`a[href*="${targetPath}"]`).first(),
+              step.description ? page.locator(`a:has-text("${step.description}"), button:has-text("${step.description}")`).first() : null,
+              step.target ? page.locator(`a:has-text("${step.target}"), button:has-text("${step.target}")`).first() : null,
+            ].filter(Boolean);
+
+            for (const loc of linkLocators) {
+              if (loc && await loc.isVisible().catch(() => false)) {
+                const box = await loc.boundingBox().catch(() => null);
+                if (box) {
+                  const cx = Math.round(box.x + box.width / 2);
+                  const cy = Math.round(box.y + box.height / 2);
+                  await page.mouse.move(cx, cy, { steps: 14 });
+                  await page.waitForTimeout(200);
+
+                  await loc.evaluate((el: HTMLElement) => {
+                    el.style.outline = '3px solid #6366f1';
+                    el.style.boxShadow = '0 0 10px rgba(99, 102, 241, 0.6)';
+                    setTimeout(() => { el.style.outline = ''; el.style.boxShadow = ''; }, 900);
+                  }).catch(() => {});
+
+                  await page.mouse.down();
+                  await page.waitForTimeout(80);
+                  await page.mouse.up();
+                  clickedLink = true;
+                  await page.waitForTimeout(2500);
+                  break;
+                }
+              }
+            }
+          } catch {
+            // Link search failed, fallback to direct navigation
+          }
+
+          if (!clickedLink && page.url() !== targetUrl) {
+            await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 35000 }).catch(() => {});
+            await page.waitForTimeout(2000);
+          }
         }
 
         this.eventLogger.logEvent({
@@ -167,18 +275,19 @@ export class WorkflowExecutor {
             const centerY = Math.round(box.y + box.height / 2);
 
             // Smooth cursor movement simulation
-            await page.mouse.move(centerX, centerY, { steps: 10 });
+            await page.mouse.move(centerX, centerY, { steps: 14 });
             await page.waitForTimeout(200);
 
             // Highlight target
             await targetEl.evaluate((el: HTMLElement) => {
-              el.style.outline = '2px solid #6366f1';
-              el.style.transition = 'outline 0.3s';
-              setTimeout(() => { el.style.outline = ''; }, 800);
+              el.style.outline = '3px solid #6366f1';
+              el.style.boxShadow = '0 0 10px rgba(99, 102, 241, 0.6)';
+              el.style.transition = 'outline 0.3s, box-shadow 0.3s';
+              setTimeout(() => { el.style.outline = ''; el.style.boxShadow = ''; }, 900);
             }).catch(() => {});
 
             await page.mouse.down();
-            await page.waitForTimeout(80);
+            await page.waitForTimeout(100);
             await page.mouse.up();
 
             this.eventLogger.logEvent({
@@ -209,6 +318,23 @@ export class WorkflowExecutor {
         const inputLocator = page.locator('input:not([type="hidden"]):visible, textarea:visible').first();
         if (await inputLocator.isVisible().catch(() => false)) {
           const box = await inputLocator.boundingBox().catch(() => null);
+          if (box) {
+            const cx = Math.round(box.x + box.width / 2);
+            const cy = Math.round(box.y + box.height / 2);
+            await page.mouse.move(cx, cy, { steps: 12 });
+            await page.waitForTimeout(150);
+
+            await inputLocator.evaluate((el: HTMLElement) => {
+              el.style.outline = '3px solid #6366f1';
+              el.style.boxShadow = '0 0 10px rgba(99, 102, 241, 0.6)';
+              setTimeout(() => { el.style.outline = ''; el.style.boxShadow = ''; }, 900);
+            }).catch(() => {});
+
+            await page.mouse.down();
+            await page.waitForTimeout(60);
+            await page.mouse.up();
+          }
+
           const val = step.value || 'Demonstration sample entry';
           await inputLocator.fill(val).catch(() => {});
 

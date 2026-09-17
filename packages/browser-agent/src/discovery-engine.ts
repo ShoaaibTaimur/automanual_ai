@@ -29,25 +29,45 @@ export class DiscoveryEngine {
   private screenshotCapture = new ScreenshotCapture();
 
   async extractNavigationLinks(page: Page, baseUrl: string): Promise<DiscoveredRoute[]> {
+    const currentUrl = page.url();
     const baseOrigin = new URL(baseUrl).origin;
+    const currentOrigin = (() => {
+      try { return new URL(currentUrl).origin; } catch { return baseOrigin; }
+    })();
 
     const links = await page.$$eval(
-      'nav a, aside a, header a, [role="navigation"] a, a',
-      (elements, origin) => {
+      'nav a, aside a, header a, [role="navigation"] a, [class*="nav" i] a, [class*="menu" i] a, [class*="sidebar" i] a, a',
+      (elements, { baseOrigin, currentOrigin }) => {
         const results: { label: string; url: string; path: string }[] = [];
         const seen = new Set<string>();
 
+        const getRoot = (hostname: string) => {
+          const parts = (hostname || '').toLowerCase().split('.');
+          return parts.length > 2 ? parts.slice(-2).join('.') : hostname;
+        };
+
+        const currRoot = getRoot(new URL(currentOrigin).hostname);
+        const baseRoot = getRoot(new URL(baseOrigin).hostname);
+
         for (const el of elements) {
           const href = el.getAttribute('href');
-          if (!href || href.startsWith('#') || href.startsWith('javascript:')) continue;
+          if (!href || href.startsWith('#') || href.startsWith('javascript:') || href.startsWith('mailto:')) continue;
 
           try {
-            const currentHref = (typeof window !== 'undefined' && window.location) ? window.location.href : origin;
-            const resolved = new URL(href, currentHref);
-            if (resolved.origin === origin && !seen.has(resolved.pathname)) {
+            const resolved = new URL(href, currentOrigin);
+            const candRoot = getRoot(resolved.hostname);
+
+            // Permissive matching: allow links on current origin, base origin, or same root domain
+            const isAllowed =
+              resolved.origin === currentOrigin ||
+              resolved.origin === baseOrigin ||
+              candRoot === currRoot ||
+              candRoot === baseRoot;
+
+            if (isAllowed && !seen.has(resolved.pathname)) {
               seen.add(resolved.pathname);
               const text = (el.textContent || '').trim();
-              if (text && text.length < 50) {
+              if (text && text.length < 50 && !/logout|signout|delete|leave/i.test(text)) {
                 results.push({
                   label: text,
                   url: resolved.toString(),
@@ -61,7 +81,7 @@ export class DiscoveryEngine {
         }
         return results;
       },
-      baseOrigin
+      { baseOrigin, currentOrigin }
     );
 
     return links;
@@ -136,9 +156,13 @@ export class DiscoveryEngine {
   ): Promise<RawSectionData[]> {
     const maxRoutes = options.maxRoutes || 6;
 
-    // Start on home / dashboard page
-    await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-    await page.waitForTimeout(3000);
+    // If page is not yet navigated (e.g. fresh browser), navigate to baseUrl.
+    // If already on a page (e.g. authenticated dashboard after login), stay on it!
+    const currentUrl = page.url();
+    if (!currentUrl || currentUrl === 'about:blank') {
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      await page.waitForTimeout(3000);
+    }
 
     const navLinks = await this.extractNavigationLinks(page, baseUrl);
     const routesToVisit = [

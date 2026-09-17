@@ -24,7 +24,6 @@ export class DiscoveryService {
       throw new NotFoundException(`Project ${projectId} not found`);
     }
 
-    // Set status to DISCOVERING
     await this.prisma.project.update({
       where: { id: projectId },
       data: { status: ProjectStatus.DISCOVERING },
@@ -34,15 +33,20 @@ export class DiscoveryService {
     const projectStorageDir = path.resolve(storageBase, 'projects', projectId);
     const sessionPath = path.join(projectStorageDir, 'session.json');
     const screenshotsDir = path.join(projectStorageDir, 'discovery');
-
     fs.mkdirSync(screenshotsDir, { recursive: true });
 
+    this.logger.log(`Starting autonomous discovery for project ${project.name} (${project.baseUrl})`);
+
+    // ONE browser handles login + crawl — no close between phases
     const runner = new BrowserRunner();
 
     try {
-      this.logger.log(`Starting autonomous discovery for project ${project.name} (${project.baseUrl})`);
+      const page = await runner.launch({
+        viewport: { width: 1920, height: 1080 },
+        slowMo: 80,
+      });
 
-      // 1. If project requires authentication, execute login first and store session
+      // ── Phase 1: Login (if required) ──────────────────────────────────────
       if (project.authRequired && project.credentialsEncrypted) {
         let username = '';
         let password = '';
@@ -59,62 +63,71 @@ export class DiscoveryService {
             username = parsed.username || '';
             password = parsed.password || '';
           } catch {
-            this.logger.warn('Failed to decrypt credentials with AES, using raw string');
+            this.logger.warn('Failed to decrypt credentials, using raw string');
           }
         }
 
-        this.logger.log(`Performing autonomous login for user "${username}" at ${project.baseUrl}...`);
-        const authPage = await runner.launch({
-          viewport: { width: 1920, height: 1080 },
-        });
+        this.logger.log(`Navigating to ${project.baseUrl} for login as "${username}"...`);
+        await page.goto(project.baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.waitForTimeout(3000);
 
-        await authPage.goto(project.baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await authPage.waitForTimeout(3000);
-        const loginResult = await this.loginManager.login(runner, authPage, {
+        const loginResult = await this.loginManager.login(runner, page, {
           username,
           password,
           storageStatePath: sessionPath,
         });
 
-        if (!loginResult.success) {
-          this.logger.warn(`Login attempt result: ${loginResult.error || 'Form still visible'}`);
-        } else {
-          this.logger.log(`Login successful! Authenticated session saved to ${sessionPath}`);
-        }
+        if (loginResult.success) {
+          const postLoginUrl = page.url();
+          this.logger.log(`Login successful! Session saved. Now on: ${postLoginUrl}`);
+          // Give SPA time to fully hydrate dashboard before crawl starts
+          await page.waitForTimeout(3500);
 
-        await runner.close();
+          // If domain or subdomain changed after login (e.g. www -> dashboard),
+          // update project.baseUrl so workflow execution runs on dashboard directly!
+          if (postLoginUrl && postLoginUrl !== 'about:blank' && postLoginUrl !== project.baseUrl) {
+            this.logger.log(`Updating project baseUrl to authenticated URL: ${postLoginUrl}`);
+            await this.prisma.project.update({
+              where: { id: projectId },
+              data: { baseUrl: postLoginUrl },
+            }).catch(() => {});
+            project.baseUrl = postLoginUrl;
+          }
+        } else {
+          this.logger.warn(`Login failed: ${loginResult.error}. Crawl will proceed from current page.`);
+        }
+      } else {
+        // No auth — just navigate to base URL
+        await page.goto(project.baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.waitForTimeout(3000);
       }
 
-      // 2. Launch browser with authenticated storageState (if available) to crawl the application
-      const page = await runner.launch({
-        viewport: { width: 1920, height: 1080 },
-        storageStatePath: fs.existsSync(sessionPath) ? sessionPath : undefined,
-      });
+      // ── Phase 2: Crawl (same browser, already authenticated) ──────────────
+      const currentUrl = page.url();
+      this.logger.log(`Starting crawl from: ${currentUrl}`);
 
-      // Crawl sections and interactive elements
       const rawSections = await this.discoveryEngine.crawlApplication(
         runner,
         page,
-        project.baseUrl,
-        { screenshotsDir, maxRoutes: 6 }
+        currentUrl, // Use currentUrl so all links on the dashboard are explored!
+        { screenshotsDir, maxRoutes: 8 },
       );
 
-      this.logger.log(`Discovered ${rawSections.length} sections for ${project.name}. Synthesizing feature map with AI...`);
+      await runner.close();
+      this.logger.log(`Discovered ${rawSections.length} sections for ${project.name}. Synthesizing with AI...`);
 
-      // Synthesize high-level feature map using Resilient AI
+      // ── Phase 3: AI synthesis ─────────────────────────────────────────────
       const discoveryData = await this.featureSynthesizer.synthesize(
         project.name,
-        project.baseUrl,
+        currentUrl,
         rawSections,
-        project.authRequired
+        project.authRequired,
       );
 
-      // Collect screenshot paths
       const screenshotPaths = rawSections
         .map(s => s.screenshotPath)
         .filter((p): p is string => Boolean(p));
 
-      // Save to database
       await this.prisma.discovery.upsert({
         where: { projectId },
         create: {
@@ -130,15 +143,12 @@ export class DiscoveryService {
         },
       });
 
-      // Update project status to PLAN_READY
       await this.prisma.project.update({
         where: { id: projectId },
         data: { status: ProjectStatus.PLAN_READY },
       });
 
-      await runner.close();
-      this.logger.log(`Discovery complete for project ${project.name}. Status updated to PLAN_READY.`);
-
+      this.logger.log(`Discovery complete for project ${project.name}.`);
       return discoveryData;
     } catch (err: any) {
       await runner.close();

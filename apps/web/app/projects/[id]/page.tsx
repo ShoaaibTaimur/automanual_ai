@@ -26,7 +26,8 @@ import {
   Flame,
   Subtitles,
   ChevronRight,
-  RotateCcw
+  RotateCcw,
+  XCircle
 } from 'lucide-react';
 
 export default function ProjectDetailsPage() {
@@ -39,9 +40,13 @@ export default function ProjectDetailsPage() {
   const [loading, setLoading] = useState(true);
   const [approving, setApproving] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'video' | 'workflows' | 'routes'>('video');
   const [copied, setCopied] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [timings, setTimings] = useState<any>(null);
+  const pipelineStartRef = useRef<number | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4001';
@@ -85,6 +90,38 @@ export default function ProjectDetailsPage() {
   useEffect(() => {
     fetchProjectData();
   }, [projectId]);
+
+  // Fetch timings when project completes
+  useEffect(() => {
+    if (project?.status === 'COMPLETED' && !timings) {
+      fetch(`${apiUrl}/api/projects/${projectId}/timings`)
+        .then(r => r.ok ? r.json() : null)
+        .then(data => { if (data) setTimings(data); })
+        .catch(() => {});
+    }
+  }, [project?.status]);
+
+  // Live elapsed timer — ticks while pipeline is running
+  useEffect(() => {
+    if (!project) return;
+    const activeStatuses = [
+      'CREATED', 'DISCOVERING', 'PLAN_READY', 'EXECUTING',
+      'RECORDING', 'GENERATING_NARRATION', 'GENERATING_VOICE', 'RENDERING_VIDEO',
+    ];
+    const isActive = activeStatuses.includes(project.status);
+
+    if (isActive) {
+      if (pipelineStartRef.current === null) {
+        pipelineStartRef.current = Date.now();
+      }
+      const interval = setInterval(() => {
+        setElapsedSeconds(Math.floor((Date.now() - (pipelineStartRef.current || Date.now())) / 1000));
+      }, 1000);
+      return () => clearInterval(interval);
+    } else {
+      pipelineStartRef.current = null;
+    }
+  }, [project?.status]);
 
   // Polling status when in active pipeline or discovery
   useEffect(() => {
@@ -163,6 +200,22 @@ export default function ProjectDetailsPage() {
     }
   };
 
+  const handleCancelPipeline = async () => {
+    setCancelling(true);
+    setError(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/projects/${projectId}/cancel`, {
+        method: 'POST',
+      });
+      if (!res.ok) throw new Error('Failed to cancel pipeline');
+      await fetchProjectData();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   const handleSeek = (timeInSeconds: number) => {
     if (videoRef.current) {
       videoRef.current.currentTime = timeInSeconds;
@@ -181,6 +234,20 @@ export default function ProjectDetailsPage() {
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
+
+  const formatMs = (ms: number) => {
+    if (!ms || ms <= 0) return '—';
+    const secs = Math.round(ms / 1000);
+    const min = Math.floor(secs / 60);
+    const sec = secs % 60;
+    return min > 0 ? `${min}m ${sec}s` : `${sec}s`;
+  };
+
+  const formatElapsed = (s: number) => {
+    const min = Math.floor(s / 60);
+    const sec = s % 60;
+    return min > 0 ? `${min}m ${sec}s` : `${sec}s`;
   };
 
   const getActionBadge = (action: string) => {
@@ -252,6 +319,17 @@ export default function ProjectDetailsPage() {
               }`}>
                 {project.status}
               </span>
+              {['DISCOVERING', 'EXECUTING', 'RECORDING', 'GENERATING_NARRATION', 'GENERATING_VOICE', 'RENDERING_VIDEO'].includes(project.status) && (
+                <button
+                  onClick={handleCancelPipeline}
+                  disabled={cancelling}
+                  className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/40 transition flex items-center gap-1 disabled:opacity-50"
+                  title="Cancel running pipeline"
+                >
+                  <XCircle className="w-3 h-3" />
+                  <span>{cancelling ? 'Cancelling...' : 'Cancel'}</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -280,19 +358,33 @@ export default function ProjectDetailsPage() {
       </header>
 
       <div className="max-w-6xl mx-auto px-6 pt-8 relative z-10">
-        {/* Prominent Failure Banner with Rerun Action */}
-        {(project.status === 'FAILED' || project.errorMessage) && (
-          <div className="mb-6 p-5 rounded-2xl bg-rose-950/40 border border-rose-500/40 shadow-2xl backdrop-blur-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        {/* Rerun banner — FAILED or COMPLETED */}
+        {(project.status === 'FAILED' || project.status === 'COMPLETED' || project.errorMessage) && (
+          <div className={`mb-6 p-5 rounded-2xl backdrop-blur-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-2xl border ${
+            project.status === 'COMPLETED'
+              ? 'bg-slate-900/60 border-slate-700'
+              : 'bg-rose-950/40 border-rose-500/40'
+          }`}>
             <div className="flex items-start gap-3">
-              <div className="w-9 h-9 rounded-xl bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0 mt-0.5">
-                <AlertCircle className="w-5 h-5" />
+              <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
+                project.status === 'COMPLETED'
+                  ? 'bg-emerald-500/10 text-emerald-400'
+                  : 'bg-rose-500/20 text-rose-400'
+              }`}>
+                {project.status === 'COMPLETED'
+                  ? <RotateCcw className="w-5 h-5" />
+                  : <AlertCircle className="w-5 h-5" />}
               </div>
               <div>
                 <h3 className="text-sm font-bold text-white mb-1">
-                  Generation Attempt Failed
+                  {project.status === 'COMPLETED' ? 'Regenerate From Scratch' : 'Generation Attempt Failed'}
                 </h3>
-                <p className="text-xs text-rose-300/90 leading-relaxed max-w-2xl">
-                  {project.errorMessage || 'An error occurred during autonomous exploration or video rendering. You can retry the pipeline without creating a new project.'}
+                <p className={`text-xs leading-relaxed max-w-2xl ${
+                  project.status === 'COMPLETED' ? 'text-slate-400' : 'text-rose-300/90'
+                }`}>
+                  {project.status === 'COMPLETED'
+                    ? 'Re-run full pipeline. All previous recordings, narration, and video will be deleted and replaced.'
+                    : (project.errorMessage || 'An error occurred during autonomous exploration or video rendering.')}
                 </p>
               </div>
             </div>
@@ -300,10 +392,14 @@ export default function ProjectDetailsPage() {
             <button
               onClick={handleRetryPipeline}
               disabled={retrying}
-              className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs transition shadow-lg shadow-rose-600/30 flex items-center gap-2 disabled:opacity-50 shrink-0"
+              className={`px-5 py-2.5 rounded-xl text-white font-semibold text-xs transition shadow-lg flex items-center gap-2 disabled:opacity-50 shrink-0 ${
+                project.status === 'COMPLETED'
+                  ? 'bg-slate-700 hover:bg-slate-600 shadow-slate-800/30'
+                  : 'bg-rose-600 hover:bg-rose-500 shadow-rose-600/30'
+              }`}
             >
               <RotateCcw className={`w-4 h-4 ${retrying ? 'animate-spin' : ''}`} />
-              <span>{retrying ? 'Rerunning Pipeline...' : 'Rerun Failed Attempt'}</span>
+              <span>{retrying ? 'Resetting Pipeline...' : project.status === 'COMPLETED' ? 'Rerun Project' : 'Rerun Failed Attempt'}</span>
             </button>
           </div>
         )}
@@ -323,7 +419,23 @@ export default function ProjectDetailsPage() {
                 <Activity className="w-4 h-4 text-indigo-400 animate-pulse" />
                 <span>Autonomous Generation Pipeline: {statusInfo.status}</span>
               </div>
-              <span className="text-sm font-bold text-white">{statusInfo.progress}%</span>
+              <div className="flex items-center gap-3">
+                {/* Live elapsed timer */}
+                <span className="flex items-center gap-1.5 text-xs font-mono text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-lg">
+                  <Clock className="w-3.5 h-3.5" />
+                  ⏱ {formatElapsed(elapsedSeconds)}
+                </span>
+                <span className="text-sm font-bold text-white">{statusInfo.progress}%</span>
+                <button
+                  onClick={handleCancelPipeline}
+                  disabled={cancelling}
+                  className="px-3 py-1 rounded-lg text-rose-300 hover:text-white bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-xs font-semibold transition flex items-center gap-1.5 disabled:opacity-50"
+                  title="Cancel pipeline"
+                >
+                  <XCircle className="w-3.5 h-3.5" />
+                  <span>{cancelling ? 'Cancelling...' : 'Cancel'}</span>
+                </button>
+              </div>
             </div>
 
             {/* Progress Track */}
@@ -340,6 +452,38 @@ export default function ProjectDetailsPage() {
               <span className={statusInfo.progress >= 70 ? 'text-indigo-400 font-bold' : ''}>3. Narrated</span>
               <span className={statusInfo.progress >= 85 ? 'text-indigo-400 font-bold' : ''}>4. Voice Synthesized</span>
               <span className={statusInfo.progress === 100 ? 'text-emerald-400 font-bold' : ''}>5. Video Rendered</span>
+            </div>
+          </div>
+        )}
+
+        {/* Timing Summary (shown after COMPLETED) */}
+        {timings && project?.status === 'COMPLETED' && (
+          <div className="mb-8 p-5 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-xl">
+            <div className="flex items-center gap-2.5 mb-4">
+              <div className="w-7 h-7 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
+                <Clock className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-white">Pipeline Timing Breakdown</h4>
+                <p className="text-[11px] text-slate-400">How long each stage took to complete</p>
+              </div>
+              <span className="ml-auto text-xs font-mono text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-lg">
+                Total: {formatMs(timings.totalMs)}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+              {([
+                { label: 'Discovery', key: 'discoveryMs', color: 'sky' },
+                { label: 'Recording', key: 'recordingMs', color: 'indigo' },
+                { label: 'Narration (AI)', key: 'narrationMs', color: 'violet' },
+                { label: 'Voice', key: 'voiceMs', color: 'amber' },
+                { label: 'Rendering', key: 'renderingMs', color: 'emerald' },
+              ] as const).map(({ label, key, color }) => (
+                <div key={key} className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-center">
+                  <div className={`text-[10px] font-semibold text-${color}-400 mb-1 uppercase tracking-wide`}>{label}</div>
+                  <div className="text-sm font-bold text-white font-mono">{formatMs(timings.stages?.[key])}</div>
+                </div>
+              ))}
             </div>
           </div>
         )}

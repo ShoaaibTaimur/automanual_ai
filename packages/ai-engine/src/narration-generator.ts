@@ -18,12 +18,20 @@ export class NarrationGenerator {
     workflows: WorkflowPlanItem[],
     events: InteractionEvent[]
   ): Promise<NarrationSegment[]> {
+    const providers = resilientLLM.getActiveProviders();
+    console.log(`[NarrationGenerator] Active providers: ${providers.join(', ') || 'NONE'}`);
+
     if (resilientLLM.hasAvailableProvider() && events.length > 0) {
       try {
-        return await this.generateWithLLM(appName, workflows, events);
+        console.log(`[NarrationGenerator] Generating AI narration for ${workflows.length} workflows, ${events.length} events...`);
+        const result = await this.generateWithLLM(appName, workflows, events);
+        console.log(`[NarrationGenerator] AI narration generated: ${result.length} segments.`);
+        return result;
       } catch (err: any) {
-        console.warn(`[NarrationGenerator] Multi-LLM narration generation failed (${err.message}). Using fallback narrator.`);
+        console.error(`[NarrationGenerator] AI narration failed: ${err.message}. Using rule-based fallback.`);
       }
+    } else if (events.length === 0) {
+      console.warn('[NarrationGenerator] No events recorded — narration will be generic.');
     }
 
     return this.generateRuleBased(appName, workflows, events);
