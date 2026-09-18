@@ -61,6 +61,9 @@ async function waitForAuthRedirect(
   const deadline = Date.now() + timeoutMs;
   const originalOrigin = (() => { try { return new URL(originalLoginUrl).origin; } catch { return ''; } })();
 
+  let retriedSubmit = false;
+  const startTime = Date.now();
+
   while (Date.now() < deadline) {
     await page.waitForTimeout(600);
 
@@ -79,6 +82,21 @@ async function waitForAuthRedirect(
       const rect = el.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0 && el.offsetParent !== null;
     }).catch(() => false);
+
+    // If still on login page after 3.5s, press Enter on password and click submit again to ensure submission
+    if (!retriedSubmit && Date.now() - startTime > 3500 && (urlIsLogin || currentUrl === originalLoginUrl)) {
+      retriedSubmit = true;
+      try {
+        const pass = page.locator('input[type="password"]').first();
+        if (await pass.isVisible().catch(() => false)) {
+          await pass.press('Enter').catch(() => {});
+        }
+        const subBtn = page.locator('button[type="submit"], input[type="submit"]').first();
+        if (await subBtn.isVisible().catch(() => false)) {
+          await subBtn.click().catch(() => {});
+        }
+      } catch {}
+    }
 
     // Success 1: Subdomain or domain changed (e.g. www.cs... -> dashboard.cs...)
     if (originChanged && !urlIsLogin) {
@@ -116,8 +134,16 @@ export class LoginManager {
     options: LoginOptions
   ): Promise<LoginResult> {
     try {
-      const preLoginUrl = page.url();
-      const detection = await this.detector.detect(page);
+      let preLoginUrl = page.url();
+      let detection = await this.detector.detect(page);
+
+      // If credentials provided but not yet on an auth page, wait up to 4s for auth redirect / form mount
+      if (!detection.isAuthPage && options.password) {
+        console.log('[LoginManager] Waiting 3s for login form or client-side redirect to settle...');
+        await page.waitForTimeout(3000);
+        detection = await this.detector.detect(page);
+        preLoginUrl = page.url();
+      }
 
       console.log(`[LoginManager] Auth detection: isAuthPage=${detection.isAuthPage}, usernameSelector=${detection.usernameSelector}, passwordSelector=${detection.passwordSelector}, submitSelector=${detection.submitSelector}`);
 

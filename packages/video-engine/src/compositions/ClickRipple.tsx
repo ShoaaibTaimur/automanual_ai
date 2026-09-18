@@ -11,10 +11,10 @@ export const ClickRipple: React.FC<ClickRippleProps> = ({ events, fps }) => {
   const frame = useCurrentFrame();
   const currentTimeMs = (frame / fps) * 1000;
 
-  // Active click events within 500ms window
+  // Active click or navigate events within 500ms window
   const activeClicks = events.filter(
     e =>
-      e.type === 'click' &&
+      (e.type === 'click' || e.type === 'navigate') &&
       typeof e.x === 'number' &&
       typeof e.y === 'number' &&
       currentTimeMs >= e.timestamp &&

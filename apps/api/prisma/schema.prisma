@@ -25,6 +25,8 @@ model Project {
   id                    String            @id @default(uuid())
   name                  String
   baseUrl               String
+  loginUrl              String?
+  authenticatedUrl      String?
   authRequired          Boolean           @default(false)
   credentialsEncrypted  String?
   status                ProjectStatus     @default(CREATED)

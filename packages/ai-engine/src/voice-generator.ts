@@ -152,27 +152,17 @@ export class VoiceGenerator {
 
       const { durationSeconds } = await this.provider.generateAudio(seg.text, audioPath);
 
-      // Align startTime strictly with the start event timestamp of this workflow in the browser
+      // Align startTime strictly with start event timestamp of this workflow, avoiding overlap
       const startEvent = events[seg.startEventIndex];
-      const startTime = startEvent ? startEvent.timestamp / 1000 : currentTimelineTime;
+      const idealStart = startEvent ? startEvent.timestamp / 1000 : currentTimelineTime;
+      const startTime = Math.max(idealStart, currentTimelineTime > 0 ? currentTimelineTime + 0.2 : 0);
 
-      // Ensure segment duration fits comfortably within the workflow's active window
-      let adjustedDuration = durationSeconds;
-      if (i < segments.length - 1) {
-        const nextStartEvent = events[segments[i + 1].startEventIndex];
-        if (nextStartEvent) {
-          const nextStartSec = nextStartEvent.timestamp / 1000;
-          const availableWindow = Math.max(2, nextStartSec - startTime - 0.5);
-          adjustedDuration = Math.min(durationSeconds, availableWindow);
-        }
-      }
-
-      currentTimelineTime = startTime + adjustedDuration;
+      currentTimelineTime = startTime + durationSeconds;
 
       results.push({
         ...seg,
         audioPath,
-        duration: adjustedDuration,
+        duration: durationSeconds,
         startTime,
       });
     }

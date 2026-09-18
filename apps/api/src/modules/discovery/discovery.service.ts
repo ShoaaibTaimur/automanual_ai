@@ -86,12 +86,15 @@ export class DiscoveryService {
           // If domain or subdomain changed after login (e.g. www -> dashboard),
           // update project.baseUrl so workflow execution runs on dashboard directly!
           if (postLoginUrl && postLoginUrl !== 'about:blank' && postLoginUrl !== project.baseUrl) {
-            this.logger.log(`Updating project baseUrl to authenticated URL: ${postLoginUrl}`);
+            this.logger.log(`Updating project authenticatedUrl to: ${postLoginUrl}`);
             await this.prisma.project.update({
               where: { id: projectId },
-              data: { baseUrl: postLoginUrl },
+              data: {
+                authenticatedUrl: postLoginUrl,
+                loginUrl: project.loginUrl || project.baseUrl,
+              },
             }).catch(() => {});
-            project.baseUrl = postLoginUrl;
+            project.authenticatedUrl = postLoginUrl;
           }
         } else {
           this.logger.warn(`Login failed: ${loginResult.error}. Crawl will proceed from current page.`);
@@ -110,7 +113,7 @@ export class DiscoveryService {
         runner,
         page,
         currentUrl, // Use currentUrl so all links on the dashboard are explored!
-        { screenshotsDir, maxRoutes: 8 },
+        { screenshotsDir, maxRoutes: 16 },
       );
 
       await runner.close();

@@ -17,7 +17,8 @@ import {
   Plus,
   CheckCircle2,
   Activity,
-  XCircle
+  XCircle,
+  Trash2
 } from 'lucide-react';
 
 export default function ProjectsLibraryPage() {
@@ -28,6 +29,7 @@ export default function ProjectsLibraryPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const pageSize = 6;
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4001';
@@ -83,6 +85,26 @@ export default function ProjectsLibraryPage() {
       // Silent error
     } finally {
       setCancellingId(null);
+    }
+  };
+
+  const handleDeleteProject = async (e: React.MouseEvent, projectId: string, projectName: string) => {
+    e.stopPropagation();
+    if (!window.confirm(`Are you sure you want to permanently delete "${projectName}" and all its recordings, audio, and project data?`)) {
+      return;
+    }
+    setDeletingId(projectId);
+    try {
+      const res = await fetch(`${apiUrl}/api/projects/${projectId}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        setProjects(prev => prev.filter(p => p.id !== projectId));
+      }
+    } catch {
+      // Silent error
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -328,6 +350,15 @@ export default function ProjectsLibraryPage() {
                           Open Studio →
                         </span>
                       )}
+                      <button
+                        type="button"
+                        onClick={(e) => handleDeleteProject(e, proj.id, proj.name)}
+                        disabled={deletingId === proj.id}
+                        className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 border border-transparent hover:border-rose-500/20 transition flex items-center justify-center disabled:opacity-50"
+                        title="Delete project and all data"
+                      >
+                        <Trash2 className={`w-3.5 h-3.5 ${deletingId === proj.id ? 'animate-spin' : ''}`} />
+                      </button>
                     </div>
                   </div>
                 </div>

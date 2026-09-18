@@ -133,6 +133,34 @@ export class RemotionVideoRenderer implements IVideoRenderer {
 
     const bundleLocation = await this.getBundle();
 
+    // Ensure Remotion's public folder dynamically links directly to current storage/projects
+    // Prevents 404 when recordings and audio are created after webpack bundle was initialized
+    try {
+      const bundlePublicDir = path.join(bundleLocation, 'public');
+      if (!fs.existsSync(bundlePublicDir)) {
+        fs.mkdirSync(bundlePublicDir, { recursive: true });
+      }
+      const projectsSrc = path.resolve(this.publicDir, 'projects');
+      const projectsDest = path.join(bundlePublicDir, 'projects');
+      if (fs.existsSync(projectsSrc)) {
+        if (fs.existsSync(projectsDest)) {
+          const stat = fs.lstatSync(projectsDest);
+          if (!stat.isSymbolicLink()) {
+            fs.rmSync(projectsDest, { recursive: true, force: true });
+            fs.symlinkSync(projectsSrc, projectsDest, 'junction');
+          }
+        } else {
+          fs.symlinkSync(projectsSrc, projectsDest, 'junction');
+        }
+      }
+    } catch {
+      // If symlink fails, copy as fallback
+      try {
+        const bundleProjects = path.join(bundleLocation, 'public', 'projects');
+        fs.cpSync(path.resolve(this.publicDir, 'projects'), bundleProjects, { recursive: true });
+      } catch {}
+    }
+
     const inputProps = {
       browserVideoUrl: browserVideoRel,
       events,

@@ -11,10 +11,10 @@ export const ElementHighlight: React.FC<ElementHighlightProps> = ({ events, fps 
   const frame = useCurrentFrame();
   const currentTimeMs = (frame / fps) * 1000;
 
-  // Only highlight real interactive clicked elements (exclude dummy screen-center boxes)
+  // Only highlight real interactive clicked/navigated elements (exclude dummy screen-center boxes)
   const activeEvent = events.find(
     e =>
-      e.type === 'click' &&
+      (e.type === 'click' || e.type === 'navigate') &&
       typeof e.x === 'number' &&
       typeof e.y === 'number' &&
       typeof e.width === 'number' &&

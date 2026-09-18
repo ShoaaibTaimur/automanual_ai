@@ -2,6 +2,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { DiscoveryService } from '../discovery/discovery.service';
 import { PlansService } from '../plans/plans.service';
+import { JobsService } from '../jobs/jobs.service';
 import { CreateProjectDto, ProjectStatus } from '@automanual/shared';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -14,6 +15,7 @@ export class ProjectsService {
     private readonly prisma: PrismaService,
     private readonly discoveryService: DiscoveryService,
     private readonly plansService: PlansService,
+    private readonly jobsService: JobsService,
   ) {}
 
   async create(dto: CreateProjectDto) {
@@ -21,6 +23,7 @@ export class ProjectsService {
       data: {
         name: dto.name,
         baseUrl: dto.baseUrl,
+        loginUrl: dto.authRequired ? dto.baseUrl : null,
         authRequired: dto.authRequired,
         credentialsEncrypted: dto.password ? `enc:${dto.username}:${dto.password}` : null,
         status: ProjectStatus.CREATED,
@@ -105,10 +108,16 @@ export class ProjectsService {
       this.logger.log(`Cleared storage dir: ${projectStorageDir}`);
     }
 
-    // 3. Reset project status and clear error
+    // 3. Reset project status, clear error, and restore original login baseUrl
+    const originalBaseUrl = project.loginUrl || project.baseUrl;
     await this.prisma.project.update({
       where: { id },
-      data: { status: ProjectStatus.CREATED, errorMessage: null },
+      data: {
+        status: ProjectStatus.CREATED,
+        errorMessage: null,
+        baseUrl: originalBaseUrl,
+        authenticatedUrl: null,
+      },
     });
 
     // 4. Re-run full pipeline from scratch
@@ -127,9 +136,29 @@ export class ProjectsService {
   }
 
   async remove(id: string) {
-    await this.findOne(id);
-    return this.prisma.project.delete({
+    const project = await this.findOne(id);
+
+    // 1. Cancel any running job / pipeline
+    await this.jobsService.cancelProject(id).catch(() => {});
+
+    // 2. Wipe storage directory (recordings, renders, audio, discovery, etc.)
+    const storageBase = process.env.STORAGE_PATH || './storage';
+    const projectStorageDir = path.resolve(storageBase, 'projects', id);
+    if (fs.existsSync(projectStorageDir)) {
+      try {
+        fs.rmSync(projectStorageDir, { recursive: true, force: true });
+        this.logger.log(`Wiped project storage directory: ${projectStorageDir}`);
+      } catch (err: any) {
+        this.logger.warn(`Failed to wipe storage dir for ${id}: ${err.message}`);
+      }
+    }
+
+    // 3. Delete from database (cascades to all related records)
+    await this.prisma.project.delete({
       where: { id },
     });
+
+    this.logger.log(`Deleted project ${id} (${project.name}) and all associated data.`);
+    return { success: true, message: 'Project and all associated data deleted successfully', id };
   }
 }

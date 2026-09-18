@@ -35,9 +35,10 @@ export class AiEngine {
   async generateNarration(
     appName: string,
     workflows: any[],
-    events: InteractionEvent[]
+    events: InteractionEvent[],
+    sections?: any[]
   ): Promise<NarrationSegment[]> {
-    return this.narrationGenerator.generateNarration(appName, workflows, events);
+    return this.narrationGenerator.generateNarration(appName, workflows, events, sections);
   }
 
   async generateVoiceover(

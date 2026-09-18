@@ -37,14 +37,22 @@ export class FeatureSynthesizer {
     rawSections: RawSectionInput[],
     authRequired: boolean
   ): Promise<DiscoveryData> {
+    const condensedSections = rawSections.map((sec) => ({
+      name: sec.name,
+      route: sec.route,
+      title: sec.title,
+      headings: sec.headings.slice(0, 3),
+      keyElements: sec.elements.slice(0, 6).map((e) => `${e.type}: ${e.text || ''}`.trim()),
+    }));
+
     const prompt = `You are an expert SaaS technical writer and software analyst.
 Analyze the following discovered web application sections, page titles, headings, and interactive elements.
 Produce a structured application map with clean business titles, summaries, and key features for user onboarding.
 
 Application: ${appName}
 Base URL: ${baseUrl}
-Raw Discovered Data:
-${JSON.stringify(rawSections, null, 2)}
+Discovered Sections:
+${JSON.stringify(condensedSections, null, 2)}
 
 Return a valid JSON object matching this schema:
 {
@@ -65,10 +73,34 @@ Return a valid JSON object matching this schema:
       'You convert raw web discovery data into structured software feature maps.'
     );
 
+    // Merge LLM enhancements with raw discovered sections so all real routes are preserved
+    const sections: ApplicationSection[] = rawSections.map((raw) => {
+      const match = (parsed.sections || []).find(
+        (s: any) =>
+          s.route === raw.route ||
+          s.name?.toLowerCase() === raw.name.toLowerCase() ||
+          s.route === raw.url
+      );
+
+      return {
+        id: raw.route.replace(/[^a-z0-9]/gi, '-').replace(/^-|-$/g, '') || 'overview',
+        name: match?.name || raw.name || raw.title || 'Overview',
+        route: raw.route,
+        description: match?.description || `Explore and manage features in the ${raw.name} section.`,
+        features:
+          match?.features && match.features.length > 0
+            ? match.features
+            : raw.elements
+                .slice(0, 4)
+                .map((e) => e.actionHint || e.text || 'Interface component')
+                .filter(Boolean),
+      };
+    });
+
     return {
       applicationName: parsed.applicationName || appName,
       baseUrl: parsed.baseUrl || baseUrl,
-      sections: parsed.sections || [],
+      sections: sections.length > 0 ? sections : (parsed.sections || []),
       authRequired,
       discoveredAt: new Date().toISOString(),
     };

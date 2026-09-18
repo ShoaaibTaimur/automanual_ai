@@ -179,15 +179,54 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
       startStage('recording');
       await this.updateStatus(projectId, ProjectStatus.RECORDING, 35, job);
 
-      // Session from discovery phase is reused — no second login needed
-      this.logger.log(`Executing ${planData.workflows.length} workflows in Chromium at 1920x1080...`);
+      let authConfig: { loginUrl: string; username: string; password: string } | undefined;
+      if (project.authRequired && project.credentialsEncrypted) {
+        let username = '';
+        let password = '';
+        const secretKey = process.env.ENCRYPTION_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
+        if (project.credentialsEncrypted.startsWith('enc:')) {
+          const parts = project.credentialsEncrypted.replace('enc:', '').split(':');
+          username = parts[0] || '';
+          password = parts[1] || '';
+        } else {
+          try {
+            const decrypted = decryptCredentials(project.credentialsEncrypted, secretKey);
+            const parsed = JSON.parse(decrypted);
+            username = parsed.username || '';
+            password = parsed.password || '';
+          } catch {}
+        }
+
+        if (username && password) {
+          authConfig = {
+            loginUrl: project.loginUrl || project.baseUrl,
+            username,
+            password,
+          };
+        }
+      }
+
+      let executionBaseUrl = project.authenticatedUrl || project.baseUrl;
+      if ((!project.authenticatedUrl || /login|signin/i.test(executionBaseUrl)) && fs.existsSync(sessionPath)) {
+        try {
+          const sessionData = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+          const originObj = sessionData.origins?.find((o: any) => !/login|auth/i.test(o.origin));
+          if (originObj?.origin) {
+            executionBaseUrl = originObj.origin;
+          }
+        } catch {}
+      }
+
+      this.logger.log(`Executing ${planData.workflows.length} workflows in Chromium at 1920x1080 (liveAuth: ${Boolean(authConfig)}, baseUrl: ${executionBaseUrl})...`);
 
       const executionResult = await this.workflowExecutor.executePlan(
         planData,
-        project.baseUrl,
+        executionBaseUrl,
         {
           storageDir: projectStorageDir,
-          storageStatePath: fs.existsSync(sessionPath) ? sessionPath : undefined,
+          storageStatePath: authConfig ? sessionPath : (fs.existsSync(sessionPath) ? sessionPath : undefined),
+          auth: authConfig,
         }
       );
 
@@ -210,10 +249,16 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
       await this.updateStatus(projectId, ProjectStatus.GENERATING_NARRATION, 55, job);
       this.logger.log(`Generating narration script for ${project.name}...`);
 
+      const discoveryRecord = await this.prisma.discovery.findUnique({
+        where: { projectId },
+      });
+      const discoverySections = (discoveryRecord?.sections as any[]) || [];
+
       const rawSegments = await this.aiEngine.generateNarration(
         project.name,
         planData.workflows,
-        executionResult.events
+        executionResult.events,
+        discoverySections
       );
 
       // Clean old narration segments if any
